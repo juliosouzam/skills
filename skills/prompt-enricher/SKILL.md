@@ -41,7 +41,7 @@ agente ou modelo.
   principal e use poucos exemplos representativos, sem convertê-los
   automaticamente em componentes ou tarefas.
 
-## Formato
+## Formato do arquivo
 
 Use apenas as seções relevantes e não crie seções vazias. Quando ajudarem na
 clareza, use estas tags semânticas:
@@ -64,5 +64,21 @@ clareza, use estas tags semânticas:
 <suggestions>Sugestões opcionais, claramente marcadas.</suggestions>
 ```
 
-O resultado deve ser somente o prompt enriquecido: mais claro e organizado,
-sem se tornar uma solicitação diferente e sem executar o pedido original.
+Grave o prompt enriquecido completo somente em:
+
+```text
+.discovery/<feature>/01-enriched-prompt.md
+```
+
+O conteúdo desse arquivo deve ser somente o prompt enriquecido: mais claro e
+organizado, sem se tornar uma solicitação diferente e sem executar o pedido
+original.
+
+## Resposta final
+
+Não reproduza no terminal ou no chat o prompt enriquecido completo nem trechos
+extensos dele. Mostre somente:
+
+- o caminho de `.discovery/<feature>/01-enriched-prompt.md`;
+- uma única frase curta resumindo os pontos mais importantes preservados no
+  arquivo.
