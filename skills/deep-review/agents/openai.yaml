@@ -1,0 +1,7 @@
+interface:
+  display_name: "Deep Review"
+  short_description: "Revisa diffs profundamente contra código e especificação"
+  default_prompt: "Use $deep-review para revisar um diff ou Milestone contra sua especificação e gerar um veredito local."
+
+policy:
+  allow_implicit_invocation: false

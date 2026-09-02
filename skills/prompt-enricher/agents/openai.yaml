@@ -1,0 +1,6 @@
+interface:
+  display_name: "Prompt Enricher"
+  short_description: "Enriquece e estrutura prompts técnicos"
+
+policy:
+  allow_implicit_invocation: false

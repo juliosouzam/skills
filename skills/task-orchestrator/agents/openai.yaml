@@ -1,0 +1,7 @@
+interface:
+  display_name: "Task Orchestrator"
+  short_description: "Executa e revisa Milestones até a main ficar verde"
+  default_prompt: "Use $task-orchestrator para executar e revisar todos os Milestones, um por vez, até a main ficar validada."
+
+policy:
+  allow_implicit_invocation: false

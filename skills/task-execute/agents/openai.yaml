@@ -1,0 +1,6 @@
+interface:
+  display_name: "Task Execute"
+  short_description: "Conclui uma Task aprovada com evidência e gates"
+
+policy:
+  allow_implicit_invocation: false

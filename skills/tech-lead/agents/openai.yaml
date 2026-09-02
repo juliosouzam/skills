@@ -1,0 +1,6 @@
+interface:
+  display_name: "Tech Lead"
+  short_description: "Transforma arquitetura em plano de execução"
+
+policy:
+  allow_implicit_invocation: false
