@@ -4,11 +4,11 @@
 Renders review.md from findings.json per references/output-contracts.md and
 appends the round to state.json (fingerprint ledger: open/resolved/dismissed).
 Refuses to render on a drifted checkout (--no-freeze-check to skip). The
-verdict is derived, never asserted: SHIP requires zero open Critical/Major
-defects (advisories never affect it) and, when a Spec contract section exists, a
+verdict is derived, never asserted: SHIP requires zero open defects of every
+severity (advisories never affect it) and, when a Spec contract section exists, a
 completed spec-parity assessment; otherwise FIX_BEFORE_SHIP. REWORK is the
 orchestrator's structural judgment — pass --rework "<rationale>"; the script
-refuses REWORK without open Critical/Major and refuses SHIP with them.
+refuses REWORK without an open defect and refuses SHIP with any defect.
 
 Requires an orchestrator-authored walkthrough.md with the contract sections.
 Exit codes: 0 ok, 1 contract violation (drifted source, missing sections,
@@ -26,7 +26,16 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True  # keep the tracked skill tree free of __pycache__
 
-from _common import SEVERITY_RANK, check_freeze, read_json, repo_root, write_json
+from _common import (
+    POLICY_VERSION,
+    SEVERITY_RANK,
+    check_freeze,
+    load_jobs,
+    read_json,
+    repo_root,
+    validate_job_output,
+    write_json,
+)
 
 SEVERITY_BADGE = {
     "critical": "🔴 Critical", "major": "🟠 Major",
@@ -155,6 +164,10 @@ def main() -> int:
             if drift:
                 raise RuntimeError(drift[0])
         manifest = read_json(out / "manifest.json")
+        if manifest.get("policy_version") != POLICY_VERSION:
+            raise RuntimeError(
+                f"manifest policy_version={manifest.get('policy_version')!r}; rebuild the round with policy {POLICY_VERSION}"
+            )
         ledger = read_json(out / "findings.json")
         rules_by_id = {rule["id"]: rule for rule in read_json(out / "rules.json")["rules"]}
         walkthrough = (out / "walkthrough.md").read_text(encoding="utf-8")
@@ -162,6 +175,19 @@ def main() -> int:
         if missing:
             raise RuntimeError(f"walkthrough.md lacks contract sections: {missing}")
         context_pack = (out / "context-pack.md").read_text(encoding="utf-8")
+        jobs = load_jobs(out / "jobs.json")
+        invalid_jobs = []
+        for job in jobs:
+            try:
+                validate_job_output(repo, out, job)
+            except ValueError as error:
+                invalid_jobs.append(str(error))
+        if invalid_jobs:
+            raise RuntimeError(f"review artifacts contain invalid job output: {invalid_jobs[0]}")
+        if manifest["counts"]["selected"] and not any(
+            job["label"] == "sweep-verdict-audit" for job in jobs
+        ):
+            raise RuntimeError("SHIP refused: mandatory sweep-verdict-audit is absent")
 
         findings = ledger["findings"]
         advisories = ledger.get("advisories", [])
@@ -170,37 +196,40 @@ def main() -> int:
         new_advisories = [f for f in advisories if f["round_status"] == "new"]
         duplicate_advisories = [f for f in advisories if f["round_status"] == "duplicate"]
         open_findings = new + duplicates
-        open_cm = [f for f in open_findings if f["severity"] in {"critical", "major"}]
+        open_defects = open_findings
+        reconciliation = ledger.get("reconciliation", {})
+        unconfirmed = reconciliation.get("unconfirmed_defects", [])
         artifacts = spec_artifacts(context_pack)
         spec_mapping = map_spec_violations(open_findings, artifacts) if artifacts else {}
 
         if args.rework is not None:
-            if not open_cm:
-                raise RuntimeError("--rework refused: no open Critical/Major supports a structural verdict")
+            if not open_defects:
+                raise RuntimeError("--rework refused: no open defect supports a structural verdict")
             if not args.rework.strip():
                 raise RuntimeError("--rework requires a non-empty rationale")
             verdict, rationale = "REWORK", args.rework.strip()
-        elif open_cm or spec_mapping:
+        elif open_defects or unconfirmed or spec_mapping:
             verdict = "FIX_BEFORE_SHIP"
             counts = defaultdict(int)
-            for finding in open_cm:
+            for finding in open_defects:
                 counts[finding["severity"]] += 1
             rationale = (
-                f"{counts['critical']} Critical and {counts['major']} Major findings "
-                "remain open; each names a bounded fix"
-                if open_cm
+                f"{len(open_defects)} defect(s) remain open "
+                f"(Critical={counts['critical']}, Major={counts['major']}, Minor={counts['minor']})"
+                if open_defects
+                else f"{len(unconfirmed)} prior defect(s) lack an explicit independent resolution"
+                if unconfirmed
                 else "open spec-parity violations block SHIP"
             )
         else:
             if artifacts:
-                jobs = read_json(out / "jobs.json")["jobs"]
                 if not any(job["label"] == "sweep-spec-parity" for job in jobs):
                     raise RuntimeError(
                         "SHIP refused: a Spec contract section exists but no spec-parity sweep "
                         "assessed it — add the sweep to plan.json and re-run the round"
                     )
             verdict = "SHIP"
-            rationale = "no Critical or Major finding remains open"
+            rationale = "no defect remains open and every prior defect was explicitly reconciled"
     except RuntimeError as error:
         sys.stderr.write(f"{error}\n")
         return 1
@@ -218,7 +247,7 @@ def main() -> int:
         "",
         f"**Verdict: {verdict}** — {rationale}",
         f"**Defects: {len(new)}** (🔴 {sev_counts['critical']} · 🟠 {sev_counts['major']} · 🟡 {sev_counts['minor']}) · "
-        f"advisories: {len(new_advisories)} · duplicates: {len(duplicates) + len(duplicate_advisories) + len(reconciliation.get('still_open_unreviewed', []))} · "
+        f"advisories: {len(new_advisories)} · duplicates: {len(duplicates) + len(duplicate_advisories) + len(reconciliation.get('still_open_unreviewed', [])) + len(reconciliation.get('unconfirmed_defects', []))} · "
         f"resolved since last round: {len(resolved)} · merged duplicate reports: {ledger['summary']['merged_raw']}",
         "",
         walkthrough.rstrip(),
@@ -253,6 +282,10 @@ def main() -> int:
         f"- _{SEVERITY_BADGE[row['severity']]}_ · {claim(row['title'])} — round {row['round']}, file unchanged"
         for fp, row in sorted(prior_ledger.items())
         if fp in set(reconciliation.get("still_open_unreviewed", []))
+    ] + [
+        f"- _{SEVERITY_BADGE[row['severity']]}_ · {claim(row['title'])} — prior defect lacks explicit resolution certification"
+        for fp, row in sorted(prior_ledger.items())
+        if fp in set(reconciliation.get("unconfirmed_defects", []))
     ]
     review += duplicate_lines + [""] if duplicate_lines else ["None.", ""]
 
@@ -286,19 +319,25 @@ def main() -> int:
     rounds = [r for r in prior_state.get("rounds", []) if r["n"] != round_n]
     rounds.append({"n": round_n, "base": manifest["base"], "head": head, "verdict": verdict,
                    "reviewed_at": datetime.now(timezone.utc).isoformat()})
-    write_json(out / "state.json", {"target": manifest["target"], "rounds": rounds, "ledger": state_ledger})
+    write_json(out / "state.json", {
+        "policy_version": POLICY_VERSION,
+        "target": manifest["target"],
+        "rounds": rounds,
+        "ledger": state_ledger,
+    })
 
     structural = [
-        f for f in open_cm
+        f for f in open_defects
         if len([j for j in (f.get("source_jobs") or []) if j.startswith("cohort-")]) >= 3
     ]
     print(f"review -> {out / 'review.md'}; state -> {out / 'state.json'}")
     print(f"verdict={verdict} defects={len(new)} "
           f"(critical={sev_counts['critical']} major={sev_counts['major']} minor={sev_counts['minor']}) "
-          f"advisories={len(new_advisories)} duplicates={len(duplicates) + len(duplicate_advisories)} resolved={len(resolved)} "
+          f"advisories={len(new_advisories)} duplicates={len(duplicates) + len(duplicate_advisories)} "
+          f"unconfirmed={len(reconciliation.get('unconfirmed_defects', []))} resolved={len(resolved)} "
           f"merged={ledger['summary']['merged_raw']}")
     if structural and verdict != "REWORK":
-        print(f"hint: {len(structural)} open Critical/Major span ≥3 cohorts — weigh --rework per the verdict rule")
+        print(f"hint: {len(structural)} open defects span ≥3 cohorts — weigh --rework per the verdict rule")
     return 0
 
 

@@ -43,13 +43,27 @@ def say(message: str) -> None:
         print(message, flush=True)
 
 
-def job_state(repo: Path, out: Path, job: dict) -> tuple[str, str]:
+def output_state(repo: Path, out: Path, job: dict) -> tuple[str, str]:
     if not (repo / job["output"]).is_file():
         return "pending", "missing output"
     try:
         validate_job_output(repo, out, job)
     except ValueError as error:
         return "invalid", str(error)
+    return "valid", ""
+
+
+def job_state(
+    repo: Path, out: Path, job: dict, jobs_by_label: dict[str, dict] | None = None
+) -> tuple[str, str]:
+    state, reason = output_state(repo, out, job)
+    if state != "valid":
+        return state, reason
+    if jobs_by_label:
+        for dependency in job.get("depends_on", []):
+            dep_state, dep_reason = output_state(repo, out, jobs_by_label[dependency])
+            if dep_state != "valid":
+                return "pending", f"waiting for dependency {dependency}: {dep_reason}"
     return "valid", ""
 
 
@@ -123,10 +137,12 @@ def run_one(repo: Path, out: Path, job: dict, args) -> dict:
             "exit_code": exit_code, "error": last_error}
 
 
-def stage_report(repo: Path, out: Path, jobs: list[dict]) -> tuple[int, list[dict]]:
+def stage_report(
+    repo: Path, out: Path, jobs: list[dict], jobs_by_label: dict[str, dict]
+) -> tuple[int, list[dict]]:
     pending = []
     for job in jobs:
-        state, reason = job_state(repo, out, job)
+        state, reason = job_state(repo, out, job, jobs_by_label)
         if state != "valid":
             pending.append({"label": job["label"], "state": state, "reason": reason})
     return len(jobs) - len(pending), pending
@@ -162,15 +178,18 @@ def main() -> int:
     out = Path(args.out).resolve()
     jobs_path = Path(args.jobs_file).resolve() if args.jobs_file else out / "jobs.json"
     try:
-        jobs = load_jobs(jobs_path)
+        all_jobs = load_jobs(jobs_path)
     except RuntimeError as error:
         sys.stderr.write(f"{error}\n")
         return 1
     if args.only:
-        unknown = set(args.only) - {job["label"] for job in jobs}
+        unknown = set(args.only) - {job["label"] for job in all_jobs}
         if unknown:
             parser.error(f"unknown jobs: {sorted(unknown)}")
-        jobs = [job for job in jobs if job["label"] in args.only]
+        jobs = [job for job in all_jobs if job["label"] in args.only]
+    else:
+        jobs = all_jobs
+    jobs_by_label = {job["label"]: job for job in all_jobs}
 
     status_path = (
         Path(args.status_file).resolve() if args.status_file
@@ -180,7 +199,7 @@ def main() -> int:
     if args.validate_only:
         rows = []
         for job in jobs:
-            state, reason = job_state(repo, out, job)
+            state, reason = job_state(repo, out, job, jobs_by_label)
             row = {"label": job["label"], "status": state, "reason": reason or None}
             if state != "valid":  # pending rows carry the dispatch contract for the engines
                 row["prompt"], row["output"] = job["prompt"], job["output"]
@@ -204,21 +223,45 @@ def main() -> int:
 
     (out / "runs").mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
-    with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = {executor.submit(run_one, repo, out, job, args): job for job in jobs}
-        for future in as_completed(futures):
-            result = future.result()
-            results.append(result)
-            if result["status"] == "fail":
-                say(f"FAIL {result['label']}: {result['error']}")
+    remaining = list(jobs)
+    while remaining:
+        ready, waiting = [], []
+        for job in remaining:
+            unmet = []
+            for dependency in job.get("depends_on", []):
+                dep_state, dep_reason = job_state(
+                    repo, out, jobs_by_label[dependency], jobs_by_label
+                )
+                if dep_state != "valid":
+                    unmet.append(f"{dependency}: {dep_reason}")
+            if unmet:
+                waiting.append((job, "; ".join(unmet)))
+            else:
+                ready.append(job)
+        if not ready:
+            for job, reason in waiting:
+                say(f"PENDING {job['label']} — waiting for {reason}")
+            break
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = {executor.submit(run_one, repo, out, job, args): job for job in ready}
+            for future in as_completed(futures):
+                result = future.result()
+                results.append(result)
+                if result["status"] == "fail":
+                    say(f"FAIL {result['label']}: {result['error']}")
+        ready_labels = {job["label"] for job in ready}
+        remaining = [job for job in remaining if job["label"] not in ready_labels]
+        if STOP_EVENT.is_set():
+            break
     results.sort(key=lambda item: str(item["label"]))
 
-    valid_count, pending = stage_report(repo, out, jobs)
+    valid_count, pending = stage_report(repo, out, jobs, jobs_by_label)
     failed = [item for item in results if item["status"] == "fail"]
     blocked = [item for item in results if item["status"] == "blocked"]
+    passed = sum(1 for item in results if item["status"] == "pass")
     write_json(status_path, {
         "mode": "run", "jobs": results,
-        "summary": {"pass": len(results) - len(failed) - len(blocked),
+        "summary": {"pass": passed,
                     "fail": len(failed), "blocked": len(blocked),
                     "stage_valid": valid_count, "stage_total": len(jobs)},
     })
@@ -232,7 +275,7 @@ def main() -> int:
             "total_jobs": len(jobs),
             "pending": [row["label"] for row in pending],
         })
-    say(f"SUMMARY pass={len(results) - len(failed) - len(blocked)} fail={len(failed)} "
+    say(f"SUMMARY pass={passed} fail={len(failed)} "
         f"blocked={len(blocked)}; stage {valid_count}/{len(jobs)} outputs valid")
 
     if not args.no_freeze_check:

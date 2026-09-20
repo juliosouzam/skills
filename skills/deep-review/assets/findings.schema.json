@@ -1,6 +1,6 @@
 {
   "type": "object",
-  "required": ["defects", "advisories", "suppressions", "coverage"],
+  "required": ["defects", "advisories", "suppressions", "resolutions", "coverage"],
   "properties": {
     "defects": {
       "type": "array",
@@ -54,7 +54,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["file", "line", "hunk", "candidate", "reason", "rule_ids", "note"],
+        "required": ["file", "line", "hunk", "candidate", "reason", "rule_ids", "note", "evidence"],
         "properties": {
           "file": { "type": "string" },
           "line": { "type": ["integer", "null"] },
@@ -62,7 +62,20 @@
           "candidate": { "type": "string", "maxLength": 140 },
           "reason": { "enum": ["linter-overlap", "intentional", "generated-vendored", "formatting", "speculative", "pre-existing", "phantom-knowledge", "duplicate-within-job"] },
           "rule_ids": { "type": "array", "items": { "type": "string" } },
-          "note": { "type": "string" }
+          "note": { "type": "string", "minLength": 20 },
+          "evidence": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } }
+        }
+      }
+    },
+    "resolutions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["fingerprint", "status", "evidence"],
+        "properties": {
+          "fingerprint": { "type": "string", "minLength": 16, "maxLength": 16 },
+          "status": { "enum": ["resolved"] },
+          "evidence": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } }
         }
       }
     },

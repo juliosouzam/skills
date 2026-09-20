@@ -971,6 +971,12 @@
   }
 
   /* ---------- sections ---------- */
+  function approvalIsCurrent() {
+    const approval = DATA.approval || {};
+    return DATA.verdict === "SHIP" && approval.verdict === "SHIP"
+      && approval.head === DATA.head && approval.round === DATA.round;
+  }
+
   function bannerHtml() {
     const v = VERDICT[DATA.verdict] || VERDICT.PENDING;
     const rationale = DATA.verdict === "PENDING"
@@ -987,7 +993,7 @@
           ${pr}
           <span><span class="mono">${esc(shortSha(DATA.base))}&hellip;${esc(shortSha(DATA.head))}</span></span>
           <span>${c.selected ?? 0} files reviewed &middot; ${c.ignored ?? 0} ignored &middot; ${c.skipped ?? 0} skipped</span>
-          <span>assertive review</span>
+          <span>${approvalIsCurrent() ? "strict approval verified" : "approval not yet verified"}</span>
         </div>
       </div>
     </section>`;
@@ -1059,9 +1065,9 @@
     let body;
     if (!open.length) {
       const res = (DATA.resolved || []).length;
-      body = DATA.verdict === "SHIP"
-        ? `<div class="empty good"><span class="e-icon">${ICONS.check}</span><h3>No open findings</h3><p>${res ? `${res} finding${res === 1 ? "" : "s"} resolved since the last round. ` : ""}This round is clean — ship it.</p></div>`
-        : `<div class="empty"><span class="e-icon">${ICONS.clock}</span><h3>No findings yet</h3><p>Reviewer outputs are merged as the round progresses.</p></div>`;
+      body = approvalIsCurrent()
+        ? `<div class="empty good"><span class="e-icon">${ICONS.check}</span><h3>No open findings</h3><p>${res ? `${res} finding${res === 1 ? "" : "s"} resolved since the last round. ` : ""}This round is clean and strict approval is verified.</p></div>`
+        : `<div class="empty"><span class="e-icon">${ICONS.clock}</span><h3>Approval pending verification</h3><p>Run verify_approval.py for this exact frozen HEAD before shipping.</p></div>`;
     } else if (!vis.length) {
       body = `<div class="empty"><span class="e-icon">${ICONS.search}</span><h3>No findings match</h3><p><button type="button" class="link-btn" id="clear-filters-empty">Clear filters</button> to see all ${open.length} open findings.</p></div>`;
     } else {
@@ -1093,7 +1099,7 @@
     const laneCoverage = coverage.lanes || {};
     parts.push(`<section class="section"><h3>Review observability</h3>
       <p class="hint">${stats.candidates ?? 0} candidates investigated · ${stats.reported ?? 0} reported before deduplication · ${stats.suppressed ?? 0} suppressions recorded.</p>
-      <p class="hint">${coverage.selected_hunk_lines ?? 0} selected hunk lines · defect coverage ${laneCoverage.defect?.complete ? "complete" : "incomplete"} · polish coverage ${laneCoverage.polish?.complete ? "complete" : "incomplete"}.</p>
+      <p class="hint">${coverage.selected_hunk_lines ?? 0} selected hunk lines · defect coverage ${laneCoverage.defect?.complete ? "complete" : "incomplete"} · polish coverage ${laneCoverage.polish?.complete ? "complete" : "incomplete"} · ${DATA.approval ? "strict approval artifact present" : "strict approval artifact absent"}.</p>
     </section>`);
     const suppressions = DATA.suppressions || [];
     if (suppressions.length) {
@@ -1105,6 +1111,12 @@
       parts.push(`<section class="section"><h3>Still open — not re-reviewed <span class="n">${unrev.length}</span></h3>
         <p class="hint">Raised in an earlier round; their files were carried or skipped this round, so their status is unchanged.</p>
         <ul class="plain-list">${unrev.map((r) => listItem(ICONS.dup, "var(--ink-3)", r.title, r.file, null, `R${r.round ?? "?"}`)).join("")}</ul></section>`);
+    }
+    const unconfirmed = DATA.unconfirmed_prior_defects || [];
+    if (unconfirmed.length) {
+      parts.push(`<section class="section"><h3>Prior defects awaiting certification <span class="n">${unconfirmed.length}</span></h3>
+        <p class="hint">These defects were not re-reported and have no independent resolution certificate; they block SHIP.</p>
+        <ul class="plain-list">${unconfirmed.map((r) => listItem(ICONS.dup, "var(--sev-major)", r.title, r.file, null, `R${r.round ?? "?"}`)).join("")}</ul></section>`);
     }
     const res = DATA.resolved || [];
     if (res.length) {

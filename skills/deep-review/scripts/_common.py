@@ -18,6 +18,7 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = SKILL_DIR / "assets"
 SEVERITY_RANK = {"trivial": 0, "minor": 1, "major": 2, "critical": 3}
 KNOWN_KINDS = {"cohort", "polish", "sweep"}
+POLICY_VERSION = 2
 
 
 # ---------- paths / IO ----------
@@ -91,7 +92,7 @@ def glob_to_regex(pat: str) -> re.Pattern:
 
 def schema_errors(value, schema: dict, path: str = "$") -> list[str]:
     """Validates the subset the bundled schemas use: type (incl. unions),
-    required, properties, items, enum, maxLength, minItems."""
+    required, properties, items, enum, min/maxLength, minItems."""
     types = schema.get("type")
     if types is not None:
         allowed = types if isinstance(types, list) else [types]
@@ -114,8 +115,11 @@ def schema_errors(value, schema: dict, path: str = "$") -> list[str]:
         if items:
             for index, item in enumerate(value):
                 errors.extend(schema_errors(item, items, f"{path}[{index}]"))
-    if isinstance(value, str) and "maxLength" in schema and len(value) > schema["maxLength"]:
-        errors.append(f"{path}: exceeds maxLength {schema['maxLength']}")
+    if isinstance(value, str):
+        if "minLength" in schema and len(value) < schema["minLength"]:
+            errors.append(f"{path}: needs at least {schema['minLength']} characters")
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            errors.append(f"{path}: exceeds maxLength {schema['maxLength']}")
     return errors
 
 
@@ -176,6 +180,30 @@ def load_jobs(path: Path) -> list[dict]:
     for job in jobs:
         if job.get("kind") not in KNOWN_KINDS:
             raise RuntimeError(f"{path}: {job.get('label')}: unknown kind {job.get('kind')!r}")
+        dependencies = job.get("depends_on", [])
+        if not isinstance(dependencies, list) or not all(isinstance(item, str) for item in dependencies):
+            raise RuntimeError(f"{path}: {job.get('label')}: depends_on must be a string array")
+        unknown = set(dependencies) - set(labels)
+        if unknown:
+            raise RuntimeError(f"{path}: {job.get('label')}: unknown dependencies {sorted(unknown)}")
+        if job["label"] in dependencies:
+            raise RuntimeError(f"{path}: {job['label']}: cannot depend on itself")
+    by_label = {job["label"]: job for job in jobs}
+    visiting, visited = set(), set()
+
+    def visit(label: str) -> None:
+        if label in visited:
+            return
+        if label in visiting:
+            raise RuntimeError(f"{path}: dependency cycle includes {label}")
+        visiting.add(label)
+        for dependency in by_label[label].get("depends_on", []):
+            visit(dependency)
+        visiting.remove(label)
+        visited.add(label)
+
+    for label in labels:
+        visit(label)
     return jobs
 
 
@@ -204,6 +232,12 @@ CERTIFICATE_RE = re.compile(
 ADVISORY_CERTIFICATE_RE = re.compile(
     r"^Premise:\s+.+\s+→\s+Improvement:\s+.+\s+→\s+Fix:\s+.+$"
 )
+SUPPRESSION_CERTIFICATE_RE = re.compile(
+    r"^Premise:\s+.+\s+→\s+Refutation:\s+.+\s+→\s+Suppression:\s+.+$"
+)
+RESOLUTION_CERTIFICATE_RE = re.compile(
+    r"^Premise:\s+.+\s+→\s+Verification:\s+.+\s+→\s+Resolution:\s+.+$"
+)
 
 
 def findings_contract_errors(payload: dict) -> list[str]:
@@ -225,6 +259,24 @@ def findings_contract_errors(payload: dict) -> list[str]:
                 f"$.advisories[{index}].evidence[0]: expected "
                 "'Premise: ... → Improvement: ... → Fix: ...' certificate"
             )
+    for index, suppression in enumerate(payload["suppressions"]):
+        certificate = suppression["evidence"][0].strip()
+        if not SUPPRESSION_CERTIFICATE_RE.fullmatch(certificate):
+            errors.append(
+                f"$.suppressions[{index}].evidence[0]: expected "
+                "'Premise: ... → Refutation: ... → Suppression: ...' certificate"
+            )
+        if not suppression["evidence"][1].strip():
+            errors.append(f"$.suppressions[{index}].evidence[1]: needs a concrete corroborating check")
+    for index, resolution in enumerate(payload["resolutions"]):
+        certificate = resolution["evidence"][0].strip()
+        if not RESOLUTION_CERTIFICATE_RE.fullmatch(certificate):
+            errors.append(
+                f"$.resolutions[{index}].evidence[0]: expected "
+                "'Premise: ... → Verification: ... → Resolution: ...' certificate"
+            )
+        if not resolution["evidence"][1].strip():
+            errors.append(f"$.resolutions[{index}].evidence[1]: needs a concrete corroborating check")
     return errors
 
 
@@ -269,13 +321,28 @@ def job_contract_errors(payload: dict, job: dict) -> list[str]:
         errors.append("$.advisories: defect jobs must leave advisory discovery to the polish lane")
     if lane == "polish" and payload.get("defects"):
         errors.append("$.defects: polish jobs must leave defect discovery to the defect lane")
-    if lane in {"defect", "polish"}:
+    if lane in {"defect", "polish", "audit"}:
         for result_kind in ("defects", "advisories"):
             for index, item in enumerate(payload.get(result_kind, [])):
                 if item.get("in_diff") and (item.get("file"), item.get("hunk")) not in expected_hunks:
                     errors.append(
                         f"$.{result_kind}[{index}]: in-diff anchor is outside job ownership"
                     )
+        for index, suppression in enumerate(payload.get("suppressions", [])):
+            if suppression.get("hunk") is not None and (suppression.get("file"), suppression["hunk"]) not in expected_hunks:
+                errors.append(
+                    f"$.suppressions[{index}]: in-diff anchor is outside job ownership"
+                )
+    expected_resolutions = set(job.get("required_resolutions", []))
+    resolution_fingerprints = [str(row.get("fingerprint")) for row in payload.get("resolutions", [])]
+    if len(resolution_fingerprints) != len(set(resolution_fingerprints)):
+        errors.append("$.resolutions: duplicate fingerprint rows")
+    unexpected_resolutions = set(resolution_fingerprints) - expected_resolutions
+    if unexpected_resolutions:
+        errors.append(
+            "$.resolutions: unassigned fingerprints "
+            f"{sorted(unexpected_resolutions)[:6]}"
+        )
     assigned_rules = expected_rules
     for result_kind in ("defects", "advisories", "suppressions"):
         for index, item in enumerate(payload.get(result_kind, [])):

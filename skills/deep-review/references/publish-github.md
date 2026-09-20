@@ -10,7 +10,7 @@ GitHub rejects `APPROVE`/`REQUEST_CHANGES` on a PR authored by the authenticated
 AUTHOR=$(gh api repos/$R/pulls/$N --jq .user.login); ME=$(gh api user --jq .login)
 ```
 
-Same login means `event=COMMENT`. For a bot/machine user, `request_changes_workflow: true` permits `REQUEST_CHANGES` only when Critical/Major **defects** are open. Advisories never change the event.
+Same login means `event=COMMENT`. For a bot/machine user, `request_changes_workflow: true` permits `REQUEST_CHANGES` whenever any **defect** is open. Advisories never change the event.
 
 ## 1. Upsert the walkthrough comment
 

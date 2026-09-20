@@ -7,8 +7,9 @@ from jobs.json outputs (validating each against the schema), merges duplicates
 by union-find (identical fingerprint, or same file + category + overlapping
 line range), and reconciles against any prior state.json ledger: new /
 duplicate (still open from a prior round) / suppressed (dismissed before;
-never re-raised) — plus the resolved sweep for prior findings the fix
-removed. Emits findings.json, the single input render_review.py consumes.
+never re-raised). Prior defects close only through an evidence-backed
+resolution emitted by the independent audit lane. Emits findings.json, the
+single input render_review.py consumes.
 
 Exit codes: 0 ok, 1 missing/invalid outputs.
 """
@@ -74,7 +75,7 @@ def line_span(finding: dict) -> tuple[int, int]:
 
 def collect(repo: Path, out: Path) -> dict[str, list[dict]]:
     results: dict[str, list[dict]] = {
-        "defects": [], "advisories": [], "suppressions": [],
+        "defects": [], "advisories": [], "suppressions": [], "resolutions": [],
         "hunk_coverage": [], "rule_coverage": [],
     }
     for job in load_jobs(out / "jobs.json"):
@@ -96,6 +97,10 @@ def collect(repo: Path, out: Path) -> dict[str, list[dict]]:
                 })
         for item in payload["suppressions"]:
             results["suppressions"].append({
+                "source_job": job["label"], "lane": job["lane"], **item,
+            })
+        for item in payload["resolutions"]:
+            results["resolutions"].append({
                 "source_job": job["label"], "lane": job["lane"], **item,
             })
         for item in payload["coverage"]["hunks"]:
@@ -172,7 +177,7 @@ def raw_ledger_entries(members: list[dict], merged: dict) -> list[dict]:
 
 
 def reconcile(canonical: list[dict], found_fps: set[str], prior_state: dict | None,
-              selected_paths: set[str], manifest_paths: set[str]) -> dict:
+              resolutions: list[dict], selected_paths: set[str], manifest_paths: set[str]) -> dict:
     ledger = (prior_state or {}).get("ledger", {})
     for finding in canonical:
         row = ledger.get(finding["fingerprint"])
@@ -184,13 +189,37 @@ def reconcile(canonical: list[dict], found_fps: set[str], prior_state: dict | No
         else:  # dismissed — overruled before; never re-raise
             finding["round_status"] = "suppressed"
             finding["suppressed_as"] = row["status"]
-    resolved, still_open = [], []
+    resolution_by_fp = {row["fingerprint"]: row for row in resolutions}
+    if len(resolution_by_fp) != len(resolutions):
+        raise RuntimeError("resolution ledger has duplicate fingerprints")
+    prior_open_defects = {
+        fp for fp, row in ledger.items()
+        if row.get("status") == "open" and row.get("result_kind") == "defect"
+    }
+    unknown_resolutions = set(resolution_by_fp) - prior_open_defects
+    if unknown_resolutions:
+        raise RuntimeError(
+            f"resolution ledger names non-open defect fingerprints: {sorted(unknown_resolutions)[:6]}"
+        )
+    conflicted_resolutions = set(resolution_by_fp) & found_fps
+    if conflicted_resolutions:
+        raise RuntimeError(
+            "a prior defect cannot be both re-reported and resolved: "
+            f"{sorted(conflicted_resolutions)[:6]}"
+        )
+
+    resolved, still_open, unconfirmed = [], [], []
     for fp, row in ledger.items():
         if row.get("status") != "open" or fp in found_fps:
             continue
-        # Resolved when the finding's file was re-reviewed (selected) or left the
-        # diff entirely (fix reverted it to base / deleted the change). A file
-        # still in the manifest but not re-reviewed (carried/skipped) stays open.
+        if row.get("result_kind") == "defect":
+            if fp in resolution_by_fp:
+                resolved.append(fp)
+            else:
+                unconfirmed.append(fp)
+            continue
+        # Advisories do not affect approval and retain their existing incremental
+        # behavior. Defects above need an explicit independent certification.
         if row.get("file") in selected_paths or row.get("file") not in manifest_paths:
             resolved.append(fp)
         else:
@@ -198,6 +227,7 @@ def reconcile(canonical: list[dict], found_fps: set[str], prior_state: dict | No
     return {
         "resolved": sorted(resolved),
         "still_open_unreviewed": sorted(still_open),
+        "unconfirmed_defects": sorted(unconfirmed),
         "prior_rounds": len((prior_state or {}).get("rounds", [])),
     }
 
@@ -283,9 +313,14 @@ def main() -> int:
     selected_paths = {f["path"] for f in manifest["files"] if f["disposition"] == "selected"}
     manifest_paths = {f["path"] for f in manifest["files"]}
     found_fps = {finding["fingerprint"] for finding in canonical_results}
-    reconciliation = reconcile(
-        canonical_results, found_fps, prior_state, selected_paths, manifest_paths
-    )
+    try:
+        reconciliation = reconcile(
+            canonical_results, found_fps, prior_state, collected["resolutions"],
+            selected_paths, manifest_paths,
+        )
+    except RuntimeError as error:
+        sys.stderr.write(f"{error}\n")
+        return 1
 
     raw_count = len(collected["defects"]) + len(collected["advisories"])
     canonical_count = len(canonical_results)
@@ -299,6 +334,8 @@ def main() -> int:
         "raw_advisories": len(collected["advisories"]),
         "canonical_defects": len(canonical_by_kind["defects"]),
         "canonical_advisories": len(canonical_by_kind["advisories"]),
+        "certified_resolutions": len(collected["resolutions"]),
+        "unconfirmed_prior_defects": len(reconciliation["unconfirmed_defects"]),
         "coverage": coverage["summary"],
     }
 
@@ -315,6 +352,7 @@ def main() -> int:
         "findings": canonical_by_kind["defects"],
         "advisories": canonical_by_kind["advisories"],
         "suppressions": collected["suppressions"],
+        "resolutions": collected["resolutions"],
         "coverage": coverage,
         "review_stats": review_stats,
         "raw_ledger": raw_ledger,

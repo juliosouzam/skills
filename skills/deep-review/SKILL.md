@@ -43,12 +43,13 @@ The manifest builder resolves `path_filters` into manifest.json; the knowledge s
 
 - Source is read-only and **frozen**: the manifest pins `worktree_snapshot`, and run_jobs.py / render_review.py refuse a drifted checkout. Writes go only to `<out>`, `.deep-review/` state, and — with `--publish` — the target PR.
 - No file-count cap: a large selection means more cohorts, never a skipped or silently truncated review. Every selected file lands in exactly one cohort.
-- Every defect starts with `Premise → Path → Verdict`; every advisory starts with `Premise → Improvement → Fix`. Investigated rejections remain visible in the suppression ledger.
+- Every defect starts with `Premise → Path → Verdict`; every advisory starts with `Premise → Improvement → Fix`. A suppression needs `Premise → Refutation → Suppression` plus a corroborating check; it cannot hide a concrete failure path.
 - Every selected hunk line receives both defect and polish coverage. Every bound rule receives an explicit compliant/violated/not-applicable assessment.
 - Run the repo's linters first and record every overlapping candidate as `linter-overlap` rather than reporting it again.
 - Cite rubric rules verbatim with their source path; severity comes from the taxonomy, never inflated.
 - Publishing needs `--publish` or the user's explicit go-ahead in this session; otherwise the review stays local.
-- Every review ends with a **SHIP / FIX_BEFORE_SHIP / REWORK** verdict derived by render_review.py and stated only after that script exits 0.
+- Every non-empty selection includes an independent `sweep-verdict-audit` adversarial pass. It must re-cover every selected hunk and explicitly revalidate every prior open defect.
+- **SHIP means zero open defects of every severity**. It is stated only after `render_review.py`, `verify_approval.py`, and `render_html.py` all exit 0; advisories remain non-blocking.
 - External `--subagent` runtimes spend `compozy exec` credit.
 
 ## Procedure
@@ -96,23 +97,31 @@ Execute `<out>/jobs.json` with the mutating runner and engine contract loaded in
 python3 <skill-dir>/scripts/run_jobs.py --out <out> --validate-only
 ```
 
-*Done when:* run_jobs.py `--validate-only` exits 0 — every defect, polish, and sweep output matches the schema and completely accounts for assigned hunks and rules.
+*Done when:* run_jobs.py `--validate-only` exits 0 — every defect, polish, and sweep output matches the schema and completely accounts for assigned hunks and rules. The generated `sweep-verdict-audit` is mandatory for every non-empty selection.
 
 **Step 4: Merge + report**
 
-Run the bootstrap merger, mutating state/report renderer, and bootstrap HTML hydrator:
+Run the bootstrap merger, mutating state/report renderer, strict approval verifier, and bootstrap HTML hydrator:
 
 ```bash
 python3 <skill-dir>/scripts/merge_findings.py --out <out>
 python3 <skill-dir>/scripts/render_review.py --out <out> [--rework "<structural rationale>"]
+```
+
+merge_findings.py emits `<out>/findings.json` plus `<out>/review-stats.json`, deduplicates both result classes, and fails unless every selected hunk line has defect and polish coverage. An old defect stays open until the audit lane either re-reports it or provides an explicit evidence-backed resolution. render_review.py derives a strict verdict from defects only; verify_approval.py proves the frozen checkout, artifacts, job outputs, policy version, HEAD, coverage, and zero-defect state and writes `<out>/approval.json`. render_html.py shows defects, advisories, suppressions, resolutions, and coverage separately in `<out>/review.html`.
+
+When (and only when) render_review.py produced `SHIP`, run the approval gate before the final HTML render:
+
+```bash
+python3 <skill-dir>/scripts/verify_approval.py --out <out>
 python3 <skill-dir>/scripts/render_html.py --out <out>
 ```
 
-merge_findings.py emits `<out>/findings.json` plus `<out>/review-stats.json`, deduplicates both result classes, reconciles rounds, and fails unless every selected hunk line has defect and polish coverage. render_review.py derives the verdict from defects only. render_html.py shows defects, advisories, suppressions, and coverage separately in `<out>/review.html`.
+For `FIX_BEFORE_SHIP` or `REWORK`, verify_approval.py must fail; that is the expected non-approval signal, not an artifact-pipeline failure.
 
-When ReportFindings is available, report defects first and every advisory afterward. The user-facing summary states the verdict, defect/advisory counts, every Critical/Major defect, coverage status, and artifact paths.
+When ReportFindings is available, report defects first and every advisory afterward. The user-facing summary states the verdict, defect/advisory counts, every open defect (including Minor), coverage status, approval state, and artifact paths.
 
-*Done when:* render_review.py and render_html.py exit 0 and the final message states the verdict, every Critical and Major defect, and the review.html path.
+*Done when:* render_review.py, verify_approval.py, and render_html.py exit 0. Only then may the final message state `SHIP`, with the approval.json and review.html paths.
 
 **Step 5: Publish (only with `--publish`)**
 
@@ -128,7 +137,9 @@ When ReportFindings is available, report defects first and every advisory afterw
 
 ## Incremental rounds
 
-With prior state (or fingerprints recovered from the PR thread), Step 1 scopes to commits since the last reviewed head and archives the prior round's artifacts under `<out>/rounds/`. Unresolved prior results re-surface once under Duplicates; dismissed fingerprints stay suppressed; resolved ones receive the ✅ edit in publish mode. `--full` reviews the whole diff again. Each round's Step 4 regenerates `<out>/review.html`, so a browser tab left open on it tracks the rounds by itself.
+With prior state (or fingerprints recovered from the PR thread), Step 1 scopes to commits since the last reviewed head and archives the prior round's artifacts under `<out>/rounds/`. Every prior open defect is assigned to the independent audit lane. It remains open unless that lane re-reports it or emits an explicit evidence-backed resolution; absence from a new output never resolves it. Dismissed fingerprints stay suppressed; resolved ones receive the ✅ edit in publish mode. `--full` reviews the whole diff again. Each round's Step 4 regenerates `<out>/review.html`, so a browser tab left open on it tracks the rounds by itself.
+
+Artifacts created before the current policy version are intentionally not approval-eligible: rebuild the manifest and run a fresh full round. A prior `SHIP` text, state entry, or HTML report cannot be upgraded in place.
 
 ## Error handling
 
@@ -137,7 +148,7 @@ With prior state (or fingerprints recovered from the PR thread), Step 1 scopes t
 - External `--subagent` failure (model not available, missing/invalid output file, non-zero exit) → apply the failure handling loaded in Step 3.
 - Empty selection after the funnel → report "nothing reviewable" with the manifest counts; write no findings.
 - A linter lane unavailable → proceed and state in review.md that overlap suppression did not run for that lane.
-- A bootstrap gate failing (build_manifest.py, build_knowledge.py, build_jobs.py, merge_findings.py) → stop and surface stderr. Missing knowledge accounting or incomplete defect/polish coverage is a review failure, not a warning.
+- A bootstrap or approval gate failing (build_manifest.py, build_knowledge.py, build_jobs.py, merge_findings.py, verify_approval.py) → stop and surface stderr. Missing knowledge accounting, incomplete coverage, unconfirmed prior defects, invalid suppressions, or policy-version mismatch are review failures, not warnings.
 - run_jobs.py exit 2 (blocked) → a provider limit interrupted the fan-out; valid outputs are preserved and `<out>/run-blocker.json` lists the pending jobs — resume by re-running the same command once the limit clears. Providers that signal limits differently need extra `--block-on` patterns.
 - run_jobs.py exit 3 or a render_review freeze failure → the checkout drifted mid-round; findings would anchor to stale lines. Restart from Step 1 — the round increments and prior artifacts are archived.
 - More than 75 publishable results → use the Step 5 batching contract.

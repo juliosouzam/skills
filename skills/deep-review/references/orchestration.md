@@ -14,7 +14,7 @@ Every stage materializes jobs with lane ownership (`{label, kind, lane, prompt, 
 | Merge | `merge_findings.py` → findings.json + review-stats.json | — | complete two-lane coverage |
 | Report | `render_review.py` → review.md + state.json; `render_html.py` → review.html | — | `render_review.py` |
 
-All job kinds (`cohort`, `polish`, `sweep`) return the same schema: defects, advisories, objective suppressions, hunk coverage, and rule coverage. `hunk` is the assigned canonical range (`<side>:<start>-<end>`), null outside the diff. Defects use the causal certificate; advisories use the improvement certificate.
+All job kinds (`cohort`, `polish`, `sweep`) return the same schema: defects, advisories, objective suppressions, explicit prior-defect resolutions, hunk coverage, and rule coverage. `hunk` is the assigned canonical range (`<side>:<start>-<end>`), null outside the diff. Defects use the causal certificate; advisories use the improvement certificate. `run_jobs.py` honors `depends_on`: the mandatory `sweep-verdict-audit` runs only after all primary outputs are valid, reads them as adversarial evidence, and re-covers every selected hunk.
 
 ## Cohort rules (Step 2)
 

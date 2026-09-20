@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True  # keep the tracked skill tree free of __pycache__
 
-from _common import freeze_snapshot, glob_to_regex
+from _common import POLICY_VERSION, freeze_snapshot, glob_to_regex
 
 ROUND_KEEP = {"state.json", "round.json", "rounds"}
 
@@ -67,7 +67,18 @@ CONFIG_NAMES = (".deep-review.yaml", ".deep-review.yml", ".coderabbit.yaml", ".c
 
 
 def run(cmd, cwd, check=True):
-    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    # Git's binary patch output is not guaranteed to be UTF-8.  The manifest
+    # only parses textual headers/hunks, so preserve undecodable bytes with
+    # surrogateescape instead of aborting before binary files can be marked as
+    # skipped/ignored.
+    proc = subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
+    )
     if check and proc.returncode != 0:
         sys.stderr.write(f"command failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr}\n")
         sys.exit(2)
@@ -358,6 +369,7 @@ def main():
 
     snapshot = freeze_snapshot(repo_root, out_dir.resolve())
     manifest = {
+        "policy_version": POLICY_VERSION,
         "target": target, "mode": "staged" if args.staged else mode, "round": round_n,
         "base": base, "effective_base": effective_base, "head": head,
         "diff_command": diff_command, "worktree_snapshot": snapshot,

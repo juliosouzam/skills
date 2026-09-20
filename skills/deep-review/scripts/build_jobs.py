@@ -28,6 +28,7 @@ sys.dont_write_bytecode = True  # keep the tracked skill tree free of __pycache_
 
 from _common import (
     ASSETS_DIR,
+    POLICY_VERSION,
     glob_to_regex,
     hunk_text,
     load_schema,
@@ -52,7 +53,7 @@ REVIEWER_PLACEHOLDERS = {
 SWEEP_PLACEHOLDERS = {
     "sweep_key", "lens", "target", "context", "manifest", "taxonomy",
     "diff_command", "spec_extra", "output", "schema", "rules_block",
-    "coverage_contract",
+    "coverage_contract", "prior_findings",
 }
 
 DEFAULT_LENSES = {
@@ -99,6 +100,14 @@ SPEC_EXTRA = (
     "what was built. When an artifact names a visual reference, require its parity evidence bundle. "
     "Set guideline to `<artifact path> — <section/field>` on every finding. An empty result asserts "
     "every listed artifact conforms."
+)
+
+VERDICT_AUDIT_KEY = "verdict-audit"
+VERDICT_AUDIT_LENS = (
+    "MISSION: independently try to disprove a clean review. FOCUS: concrete defects missed by "
+    "the primary lanes, unsupported suppressions, contract gaps, and prior defects alleged to be "
+    "fixed. REPORT GATE: either provide a causal defect or, for every assigned prior defect, an "
+    "explicit evidence-backed resolution. This is an adversarial gate, not a summary of sibling work."
 )
 
 PLACEHOLDER_RE = re.compile(r"\{\{([a-z_]+)\}\}")
@@ -423,6 +432,38 @@ def coverage_contract(required_hunks: list[dict], rule_ids: list[str], check: st
     )
 
 
+def selected_hunks(selected: dict[str, dict]) -> list[dict]:
+    return [
+        {"file": path, "hunk": hunk_text(hunk)}
+        for path, item in selected.items()
+        for hunk in item["hunks"]
+    ]
+
+
+def prior_open_defects(state: dict | None) -> list[dict]:
+    rows = []
+    for fingerprint, row in sorted((state or {}).get("ledger", {}).items()):
+        if row.get("status") == "open" and row.get("result_kind") == "defect":
+            rows.append({"fingerprint": fingerprint, **row})
+    return rows
+
+
+def prior_findings_block(rows: list[dict]) -> str:
+    if not rows:
+        return "No prior open defects require reconfirmation. Write an empty `resolutions` array."
+    lines = [
+        "For EACH row below, either re-report the still-open defect with its exact title so its "
+        "fingerprint is retained, or add one `resolutions` entry only after observing a concrete fix. "
+        "An omitted row blocks SHIP.",
+    ]
+    for row in rows:
+        lines.append(
+            f"- fp={row['fingerprint']} · {row.get('file', '?')} · severity={row.get('severity', '?')} "
+            f"· title={row.get('title', '?')}"
+        )
+    return "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True)
@@ -438,6 +479,10 @@ def main() -> int:
     out = Path(args.out).resolve()
     try:
         manifest = read_json(out / "manifest.json")
+        if manifest.get("policy_version") != POLICY_VERSION:
+            raise RuntimeError(
+                f"manifest policy_version={manifest.get('policy_version')!r}; rebuild the manifest with policy {POLICY_VERSION}"
+            )
         plan = read_json(out / "plan.json")
         registry = read_json(out / "rules.json")
         knowledge = read_json(out / "knowledge.json")
@@ -449,12 +494,20 @@ def main() -> int:
             raise RuntimeError("manifest.json lacks diff_command — rebuild it with the current build_manifest.py")
 
         selected = manifest_selected(manifest)
+        prior_state = read_json(out / "state.json") if (out / "state.json").is_file() else None
+        prior_defects = prior_open_defects(prior_state)
         errors = validate_registry(registry, knowledge, selected) + validate_cohorts(
             plan["cohorts"], selected, args.max_cohort_files
         )
         if errors:
             raise RuntimeError("plan validation failed:\n- " + "\n- ".join(errors))
         sweeps = normalize_sweeps(plan, context_pack)
+        if any(sweep["key"] == VERDICT_AUDIT_KEY for sweep in sweeps):
+            raise RuntimeError(
+                f"{VERDICT_AUDIT_KEY} is reserved: build_jobs.py schedules the mandatory audit itself"
+            )
+        if selected or prior_defects:
+            sweeps.append({"key": VERDICT_AUDIT_KEY, "lens": VERDICT_AUDIT_LENS})
 
         reviewer_template = load_template("reviewer")
         sweep_template = load_template("sweep")
@@ -546,21 +599,39 @@ def main() -> int:
             bound_rules = cohort_rules(rules, list(selected))
             block, _ = rules_block(rules, list(selected))
             rule_ids = [rule["id"] for rule in bound_rules]
+            is_verdict_audit = sweep["key"] == VERDICT_AUDIT_KEY
+            audit_hunks = selected_hunks(selected) if is_verdict_audit else []
+            audit_rules = [row["fingerprint"] for row in prior_defects] if is_verdict_audit else []
+            audit_lens = sweep["lens"] + (
+                " Read every completed primary reviewer JSON under `"
+                f"{rel(out / 'agents', repo)}` and challenge each suppression; promote any unrefuted "
+                "concrete failure path into a defect rather than accepting the suppression."
+                if is_verdict_audit else ""
+            )
             prompt = render_template("sweep", sweep_template, SWEEP_PLACEHOLDERS, {
                 **shared,
                 "sweep_key": sweep["key"],
-                "lens": sweep["lens"],
+                "lens": audit_lens,
                 "manifest": rel(out / "manifest.json", repo),
                 "spec_extra": SPEC_EXTRA if sweep["key"] == "spec-parity" else "",
                 "output": rel(output, repo),
                 "rules_block": block,
-                "coverage_contract": coverage_contract([], rule_ids, f"sweep:{sweep['key']}"),
+                "coverage_contract": coverage_contract(
+                    audit_hunks, rule_ids,
+                    "audit" if is_verdict_audit else f"sweep:{sweep['key']}",
+                ),
+                "prior_findings": prior_findings_block(prior_defects) if is_verdict_audit else (
+                    "No prior open defects are assigned to this sweep; write an empty `resolutions` array."
+                ),
             })
             (prompts_dir / f"{label}.md").write_text(prompt, encoding="utf-8")
             jobs.append({
-                "label": label, "kind": "sweep", "lane": "sweep",
-                "coverage_check": f"sweep:{sweep['key']}", "required_hunks": [],
+                "label": label, "kind": "sweep", "lane": "audit" if is_verdict_audit else "sweep",
+                "coverage_check": "audit" if is_verdict_audit else f"sweep:{sweep['key']}",
+                "required_hunks": audit_hunks,
                 "rule_ids": rule_ids,
+                "required_resolutions": audit_rules,
+                "depends_on": [job["label"] for job in jobs] if is_verdict_audit else [],
                 "prompt": rel(prompts_dir / f"{label}.md", repo),
                 "output": rel(output, repo),
             })

@@ -25,7 +25,8 @@ REVIEW:
 2. INSPECT every owned hunk through the assigned lane. Check every bound repo rule explicitly. When one pattern repeats, search the cohort and enumerate occurrences under one result's `also_applies`.
 3. REFUTE candidates against the checkout. Defects require a named input/state and causal path; their first evidence entry is `Premise: <fact at file:line> → Path: <caller/input/control flow> → Verdict: <failure>`. Advisories require a concrete local benefit and fix; their first entry is `Premise: <fact at file:line> → Improvement: <specific benefit> → Fix: <bounded change>`. Later entries record `command or file:line → what it showed`.
 4. REPORT every survivor in the lane's result array. This review is always assertive: a small advisory survives when it is specific, actionable, and not owned by a formatter or a linter. Assign impact only after refutation. Set `hunk` on every in-diff result; outside-diff results set `in_diff` false and `hunk` null. Fill `suggestion` only with an exact, self-contained replacement.
-5. RECORD every investigated candidate dropped by an objective taxonomy rule in `suppressions`; never silently discard it. Then complete the exact hunk and rule accounting below. A clear hunk still needs a coverage row.
+5. RECORD every investigated candidate dropped by an objective taxonomy rule in `suppressions`; never silently discard it. Every suppression needs a specific note, a first evidence entry in the form `Premise: … → Refutation: … → Suppression: …`, and a second corroborating command or file:line check. Do not use a suppression to downgrade a concrete failure path.
+6. This lane owns no prior-defect resolution. Write `resolutions: []`. Then complete the exact hunk and rule accounting below. A clear hunk still needs a coverage row.
 
 {{coverage_contract}}
 
@@ -41,7 +42,12 @@ Read `{{context}}`, `{{manifest}}`, and `{{taxonomy}}` in full. Work from the ma
 REPO RULES applicable across the selected surface — account for every id:
 {{rules_block}}
 
-Find concrete cross-cohort hypotheses through this lens, enumerate every occurrence, then refute each with repository evidence. Put causal failures in `defects` with `Premise → Path → Verdict`; put measurable structural or convention improvements in `advisories` with `Premise → Improvement → Fix`. Record investigated candidates rejected by an objective taxonomy rule in `suppressions`. Cross-cohort results are the point of this sweep — cohort lanes own single-cohort results.{{spec_extra}}
+Find concrete cross-cohort hypotheses through this lens, enumerate every occurrence, then refute each with repository evidence. Put causal failures in `defects` with `Premise → Path → Verdict`; put measurable structural or convention improvements in `advisories` with `Premise → Improvement → Fix`. Record investigated candidates rejected by an objective taxonomy rule in `suppressions`; every suppression needs `Premise → Refutation → Suppression` plus a second corroborating command or file:line check. Cross-cohort results are the point of this sweep — cohort lanes own single-cohort results.{{spec_extra}}
+
+PRIOR OPEN DEFECTS / RESOLUTION OWNERSHIP:
+{{prior_findings}}
+
+`resolutions` is for the assigned prior defects only. A resolution requires `Premise: … → Verification: … → Resolution: …` plus a second corroborating check. If a prior defect remains true, report it again as a defect instead; never omit it.
 
 {{coverage_contract}}
 

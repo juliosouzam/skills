@@ -6,7 +6,7 @@ The grammar for defects, advisories, evidence, and objective suppressions. Every
 
 | Class | Categories | Verdict impact | Decision rule |
 | --- | --- | --- | --- |
-| **Defect** | `⚠️ Potential issue` | Critical/Major block SHIP | The change can produce a wrong result, crash, leak, vulnerability, broken contract, or failing-capable test gap under a concrete input/state. |
+| **Defect** | `⚠️ Potential issue` | Every severity blocks SHIP | The change can produce a wrong result, crash, leak, vulnerability, broken contract, or failing-capable test gap under a concrete input/state. |
 | **Advisory** | `🛠️ Refactor suggestion`, `🧹 Nitpick` | Never | The code can remain functional, but a bounded change measurably improves maintainability, simplicity, clarity, naming, documentation, idiom, or conformance with a project rule/skill. |
 
 There is no advisory quota. A small advisory is valid when the premise is observed, the benefit is specific, and the fix is bounded. Formatter-owned style and vague preferences are suppressions, not advisories.
@@ -54,7 +54,7 @@ A result on untouched lines is allowed only when the diff breaks that code or wh
 
 When an investigated candidate is rejected, record it in `suppressions` with one of these reasons and a concrete note:
 
-1. `linter-overlap` — a linter/typechecker lane already reports it.
+1. `linter-overlap` — a linter/typechecker lane already reports it; cite that command and its result.
 2. `intentional` — an adjacent justified disable, ADR, comment, or behavior-locking test proves intent.
 3. `generated-vendored` — the manifest excludes ownership of generated/vendor code.
 4. `formatting` — a configured formatter owns the proposed change.
@@ -62,6 +62,12 @@ When an investigated candidate is rejected, record it in `suppressions` with one
 6. `pre-existing` — untouched debt satisfies neither outside-diff clause.
 7. `phantom-knowledge` — the claim depends on uninspected code or an irrelevant framework generality.
 8. `duplicate-within-job` — the candidate is represented by another result and its anchor appears under `also_applies`.
+
+Every suppression is auditable evidence, not an assertion. Its first evidence row is
+`Premise: <candidate at file:line> → Refutation: <observed counterevidence> → Suppression: <allowed reason>`;
+its second row cites the corroborating command or file location. An unsupported
+suppression invalidates the entire job output. Never suppress a candidate with a
+concrete failure path merely because its impact is Minor.
 
 Profile, volume, low severity, and personal taste are not suppression reasons.
 

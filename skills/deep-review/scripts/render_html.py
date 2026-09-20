@@ -2,9 +2,9 @@
 """Deep-review HTML report generator (bootstrap helper; writes only under --out).
 
 Hydrates assets/REVIEW_UI.html — the fixed, self-contained report UI — with the
-round's artifacts: defects/advisories/suppressions/coverage from findings.json
+round's artifacts: defects/advisories/suppressions/resolutions/coverage from findings.json
 and manifest.json (required), plus state.json, walkthrough.md, rules.json,
-review.md and archived rounds when present. Emits
+review.md, approval.json and archived rounds when present. Emits
 <out>/review.html, the human-facing view of the review; agents keep consuming
 the JSON artifacts. Cheap and idempotent — re-run it after merge_findings.py
 and after render_review.py so the open dashboard (which auto-reloads) always
@@ -141,6 +141,7 @@ def build_payload(repo: Path, out: Path) -> dict:
     except RuntimeError as error:
         raise RuntimeError(f"{error} — run merge_findings.py first") from error
     state = read_optional_json(out / "state.json")
+    approval = read_optional_json(out / "approval.json")
     rules = read_optional_json(out / "rules.json") or {"rules": []}
     rules_by_id = {rule["id"]: rule for rule in rules["rules"]}
     review_md = read_optional_text(out / "review.md")
@@ -174,8 +175,13 @@ def build_payload(repo: Path, out: Path) -> dict:
         "suppressions": ledger.get("suppressions", []),
         "coverage": ledger.get("coverage", {}),
         "review_stats": ledger.get("review_stats", {}),
+        "resolutions": ledger.get("resolutions", []),
+        "approval": approval,
         "resolved": ledger_rows(state, reconciliation.get("resolved", [])),
         "unreviewed_open": ledger_rows(state, reconciliation.get("still_open_unreviewed", [])),
+        "unconfirmed_prior_defects": ledger_rows(
+            state, reconciliation.get("unconfirmed_defects", [])
+        ),
         "dismissed": dismissed_rows(state),
         "rounds": rounds_timeline(out, state, manifest, ledger, verdict),
         "walkthrough": read_optional_text(out / "walkthrough.md"),

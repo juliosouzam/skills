@@ -28,7 +28,7 @@ printf '%s' "defect|internal/store/queue.go|potential-issue|dont hard fail prefe
 }
 ```
 
-`status`: `open` → `resolved` (fix observed) | `dismissed` (user rejected — capture a learning; never re-raised). `comment_id` only when published.
+`status`: `open` → `resolved` (the independent audit observed a fix and emitted a resolution certificate) | `dismissed` (user rejected — capture a learning; never re-raised). `comment_id` only when published.
 
 ## Round reconciliation (Step 4)
 
@@ -38,7 +38,7 @@ Implemented by merge_findings.py (round status) and render_review.py (ledger upd
 - **present, `open`** → `duplicate`; render once in the Duplicates section, keep ledger row.
 - **present, `dismissed`** → keep suppressed from the active results and expose it in the dismissed/suppression audit trail.
 
-Then sweep the ledger's `open` rows *not* re-found this round: if the row's file was re-reviewed (selected) or left the diff entirely, mark `resolved` (`resolved_in` = head; publish mode adds the ✅ edit); if the file sits in the manifest un-re-reviewed (carried/skipped), keep `open` and list it under Duplicates.
+Then sweep the ledger's `open` rows *not* re-found this round. A **defect** stays open unless the mandatory `sweep-verdict-audit` emits a resolution certificate for its fingerprint; selecting its file, deleting its diff hunk, or omitting it from a reviewer output is never proof of resolution. A still-open prior defect is listed as unconfirmed and blocks `SHIP`. Advisories retain the lighter incremental reconciliation because they do not control approval.
 
 ## learnings.md (at `.deep-review/learnings.md`, repo-committable)
 
@@ -58,7 +58,7 @@ Append-only entries, one per correction:
 
 ## Storage conventions
 
-- `<out>` holds manifest.json, knowledge.json, rules.json, context-pack.md, plan.json, prompts/, jobs.json, agents/, runs/, walkthrough.md, findings.json, review-stats.json, review.md, review.html, state.json, and round.json.
+- `<out>` holds manifest.json, knowledge.json, rules.json, context-pack.md, plan.json, prompts/, jobs.json, agents/, runs/, walkthrough.md, findings.json, review-stats.json, review.md, approval.json, review.html, state.json, and round.json.
 - When build_manifest.py starts a new round it archives everything except state.json/round.json/rounds/ into `<out>/rounds/round-<n>/` — the per-round audit trail; only state.json carries memory forward.
 - `.deep-review/learnings.md` is shared across targets and worth committing — it is team review doctrine.
 - Recommend adding `.deep-review/` to `.gitignore` with `!.deep-review/learnings.md` — suggest it once when the directory is first created; the decision belongs to the user.
